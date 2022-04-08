@@ -70,7 +70,7 @@ def softmax_mIOU_score(output, target):
     mIOU_score = []
     mIOU_score.append(mIOU(o=(output==1),t=(target==1)))
     mIOU_score.append(mIOU(o=(output==2),t=(target==2)))
-    mIOU_score.append(mIOU(o=(output==3),t=(target==4)))
+    mIOU_score.append(mIOU(o=(output==3),t=(target==3)))
     return mIOU_score
 
 
@@ -82,7 +82,7 @@ def softmax_output_dice(output, target):
     ret += dice_score(o, t),
     # core
     o = (output == 1) | (output == 3)
-    t = (target == 1) | (target == 4)
+    t = (target == 1) | (target == 3)
     ret += dice_score(o, t),
     # active
     o = (output == 3);t = (target == 4)
@@ -110,7 +110,7 @@ def validate_softmax(
         valid_in_train=False,  # if you are valid when train
         ):
 
-    H, W, T = 240, 240, 160
+    H, W, T = 240, 240, 155
     model.eval()
 
     runtimes = []

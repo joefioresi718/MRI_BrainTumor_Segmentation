@@ -129,17 +129,7 @@ def transform_valid(sample):
 
 
 class BraTS(Dataset):
-    def __init__(self, list_file, root='', mode='train'):
-        self.lines = []
-        paths, names = [], []
-        with open(list_file) as f:
-            for line in f:
-                line = line.strip()
-                name = line.split('/')[-1]
-                names.append(name)
-                path = os.path.join(root, line, name + '_')
-                paths.append(path)
-                self.lines.append(line)
+    def __init__(self, names, paths, mode='train'):
         self.mode = mode
         self.names = names
         self.paths = paths
@@ -147,17 +137,17 @@ class BraTS(Dataset):
     def __getitem__(self, item):
         path = self.paths[item]
         if self.mode == 'train':
-            image, label = pkload(path + 'data_f32b0.pkl')
+            image, label = pkload(path)
             sample = {'image': image, 'label': label}
             sample = transform(sample)
             return sample['image'], sample['label']
         elif self.mode == 'valid':
-            image, label = pkload(path + 'data_f32b0.pkl')
+            image, label = pkload(path)
             sample = {'image': image, 'label': label}
             sample = transform_valid(sample)
             return sample['image'], sample['label']
         else:
-            image = pkload(path + 'data_f32b0.pkl')
+            image = pkload(path)
             image = np.pad(image, ((0, 0), (0, 0), (0, 5), (0, 0)), mode='constant')
             image = np.ascontiguousarray(image.transpose(3, 0, 1, 2))
             image = torch.from_numpy(image).float()

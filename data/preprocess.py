@@ -2,19 +2,21 @@ import pickle
 import os
 import numpy as np
 import nibabel as nib
+import glob
+
 
 modalities = ('flair', 't1ce', 't1', 't2')
 
 # train
 train_set = {
-        'root': 'path to training set',
-        'flist': 'all.txt',
+        'root': 'imagesTr/',
+        'flist': glob.glob('imagesTr/*'),
         'has_label': True
         }
 
 # test/validation data
 valid_set = {
-        'root': 'path to validation set',
+        'root': '',
         'flist': 'valid.txt',
         'has_label': False
         }
@@ -60,10 +62,11 @@ def process_f32b0(path, has_label=True):
     """ Save the data with dtype=float32.
         z-score is used but keep the background with zero! """
     if has_label:
-        label = np.array(nib_load(path + 'seg.nii.gz'), dtype='uint8', order='C')
-    images = np.stack([np.array(nib_load(path + modal + '.nii.gz'), dtype='float32', order='C') for modal in modalities], -1)  # [240,240,155]
+        label = np.array(nib_load(path.replace('images', 'labels')), dtype='uint8', order='C')
+    images = np.stack([np.array(nib_load(path), dtype='float32', order='C')[...,i] for i in range(len(modalities))], -1)
+    # [240,240,155]
 
-    output = path + 'data_f32b0.pkl'
+    output = path.replace('imagesTr', 'data').replace('.nii.gz', '') + '_f32b0.pkl'
     mask = images.sum(-1) > 0
     for k in range(4):
 
@@ -90,19 +93,19 @@ def process_f32b0(path, has_label=True):
 
 def doit(dset):
     root, has_label = dset['root'], dset['has_label']
-    file_list = os.path.join(root, dset['flist'])
-    subjects = open(file_list).read().splitlines()
-    names = [sub.split('/')[-1] for sub in subjects]
-    paths = [os.path.join(root, sub, name + '_') for sub, name in zip(subjects, names)]
+    # file_list = os.path.join(root, dset['flist'])
+    file_list = dset['flist']
+    # subjects = open(file_list).read().splitlines()
+    # names = [sub.split('/')[-1] for sub in subjects]
+    # paths = [os.path.join(root, sub, name + '_') for sub, name in zip(subjects, names)]
 
-    for path in paths:
+    for path in file_list:
 
         process_f32b0(path, has_label)
 
 
-
 if __name__ == '__main__':
     doit(train_set)
-    doit(valid_set)
+    # doit(valid_set)
     # doit(test_set)
 

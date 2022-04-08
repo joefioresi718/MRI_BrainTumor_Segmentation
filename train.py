@@ -1,4 +1,4 @@
-# python3 -m torch.distributed.launch --nproc_per_node=4 --master_port 20003 train_spup3.py
+# python3 -m torch.distributed.launch --nproc_per_node=4 --master_port 20003 train.py
 
 import argparse
 import os
@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from utils.tools import all_reduce_tensor
 from tensorboardX import SummaryWriter
 from torch import nn
+from sklearn.model_selection import KFold
 
 
 local_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -27,7 +28,7 @@ local_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 parser = argparse.ArgumentParser()
 
 # Basic Information
-parser.add_argument('--user', default='name of user', type=str)
+parser.add_argument('--user', default='cap5516.student4', type=str)
 
 parser.add_argument('--experiment', default='TransBTS', type=str)
 
@@ -39,11 +40,11 @@ parser.add_argument('--description',
                     type=str)
 
 # DataSet Information
-parser.add_argument('--root', default='path to training set', type=str)
+parser.add_argument('--root', default='data/', type=str)
 
-parser.add_argument('--train_dir', default='Train', type=str)
+parser.add_argument('--train_dir', default='data/', type=str)
 
-parser.add_argument('--valid_dir', default='Valid', type=str)
+parser.add_argument('--valid_dir', default='data/', type=str)
 
 parser.add_argument('--mode', default='train', type=str)
 
@@ -86,17 +87,17 @@ parser.add_argument('--seed', default=1000, type=int)
 
 parser.add_argument('--no_cuda', default=False, type=bool)
 
-parser.add_argument('--gpu', default='0,1,2,3', type=str)
+parser.add_argument('--gpu', default='0,1', type=str)
 
 parser.add_argument('--num_workers', default=8, type=int)
 
-parser.add_argument('--batch_size', default=8, type=int)
+parser.add_argument('--batch_size', default=4, type=int)
 
 parser.add_argument('--start_epoch', default=0, type=int)
 
 parser.add_argument('--end_epoch', default=1000, type=int)
 
-parser.add_argument('--save_freq', default=1000, type=int)
+parser.add_argument('--save_freq', default=100, type=int)
 
 parser.add_argument('--resume', default='', type=str)
 
@@ -110,6 +111,7 @@ args = parser.parse_args()
 def main_worker():
     if args.local_rank == 0:
         log_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log', args.experiment+args.date)
+        os.makedirs(log_dir, exist_ok=True)
         log_file = log_dir + '.txt'
         log_args(log_file)
         logging.info('--------------------------------------This is all argsurations----------------------------------')
@@ -134,7 +136,6 @@ def main_worker():
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, amsgrad=args.amsgrad)
 
-
     criterion = getattr(criterions, args.criterion)
 
     if args.local_rank == 0:
@@ -155,80 +156,107 @@ def main_worker():
         logging.info('Successfully loading checkpoint {} and training from epoch: {}'
                      .format(args.resume, args.start_epoch))
     else:
-        logging.info('re-training!!!')
-
-    train_list = os.path.join(args.root, args.train_dir, args.train_file)
-    train_root = os.path.join(args.root, args.train_dir)
-
-    train_set = BraTS(train_list, train_root, args.mode)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
-    logging.info('Samples for train = {}'.format(len(train_set)))
-
+        logging.info('Re-training!!!')
 
     num_gpu = (len(args.gpu)+1) // 2
 
-    train_loader = DataLoader(dataset=train_set, sampler=train_sampler, batch_size=args.batch_size // num_gpu,
-                              drop_last=True, num_workers=args.num_workers, pin_memory=True)
+    # evaluation
+    submission = os.path.join(os.path.abspath(os.path.dirname(__file__)), args.output_dir,
+                              args.submission, args.experiment + args.test_date)
+    visual = os.path.join(os.path.abspath(os.path.dirname(__file__)), args.output_dir,
+                          args.visual, args.experiment + args.test_date)
 
     start_time = time.time()
 
     torch.set_grad_enabled(True)
 
-    for epoch in range(args.start_epoch, args.end_epoch):
-        train_sampler.set_epoch(epoch)  # shuffle
-        setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
-        start_epoch = time.time()
+    train_list = os.path.join(args.root, args.train_dir, args.train_file)
+    train_root = os.path.join(args.root, args.train_dir)
 
-        for i, data in enumerate(train_loader):
+    paths, names = [], []
+    with open(train_list) as f:
+        for line in f:
+            line = line.strip()
+            names.append(line)
+            path = os.path.join(train_root, line)
+            paths.append(path)
 
-            adjust_learning_rate(optimizer, epoch, args.end_epoch, args.lr)
+    # k-fold cross valid
+    kf = KFold(n_splits=5, shuffle=True)
 
-            x, target = data
-            x = x.cuda(args.local_rank, non_blocking=True)
-            target = target.cuda(args.local_rank, non_blocking=True)
+    for train_index, test_index in kf.split(names):
+        train_set = BraTS(names[train_index], paths[train_index], 'train')
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
+        valid_set = BraTS(names[test_index], paths[test_index], 'valid')
+        valid_sampler = torch.utils.data.distributed.DistributedSampler(valid_set)
+
+        logging.info('Samples for train = {}'.format(len(train_set)))
+        logging.info('Samples for valid = {}'.format(len(valid_set)))
+
+        train_loader = DataLoader(dataset=train_set, sampler=train_sampler, batch_size=args.batch_size // num_gpu,
+                                  drop_last=True, num_workers=args.num_workers, pin_memory=True)
+        valid_loader = DataLoader(dataset=valid_set, batch_size=1, shuffle=False, num_workers=args.num_workers,
+                                  pin_memory=True)
+
+        for epoch in range(args.start_epoch, args.end_epoch):
+            train_sampler.set_epoch(epoch)  # shuffle
+            valid_sampler.set_epoch(epoch)
+            setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
+            start_epoch = time.time()
+
+            for i, data in enumerate(train_loader):
+
+                adjust_learning_rate(optimizer, epoch, args.end_epoch, args.lr)
+
+                x, target = data
+                x = x.cuda(args.local_rank, non_blocking=True)
+                target = target.cuda(args.local_rank, non_blocking=True)
 
 
-            output = model(x)
+                output = model(x)
 
-            loss, loss1, loss2, loss3 = criterion(output, target)
-            reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
+                loss, loss1, loss2, loss3 = criterion(output, target)
+                reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
+                reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
+                reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
+                reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
+
+                if args.local_rank == 0:
+                    logging.info('Epoch: {}_Iter:{}  loss: {:.5f} || 1:{:.4f} | 2:{:.4f} | 3:{:.4f} ||'
+                                 .format(epoch, i, reduce_loss, reduce_loss1, reduce_loss2, reduce_loss3))
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            end_epoch = time.time()
+            if args.local_rank == 0:
+                if (epoch + 1) % int(args.save_freq) == 0 \
+                        or (epoch + 1) % int(args.end_epoch - 1) == 0 \
+                        or (epoch + 1) % int(args.end_epoch - 2) == 0 \
+                        or (epoch + 1) % int(args.end_epoch - 3) == 0:
+                    file_name = os.path.join(checkpoint_dir, 'model_epoch_{}.pth'.format(epoch))
+                    torch.save({
+                        'epoch': epoch,
+                        'state_dict': model.state_dict(),
+                        'optim_dict': optimizer.state_dict(),
+                    },
+                        file_name)
+
+                writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar('loss:', reduce_loss, epoch)
+                writer.add_scalar('loss1:', reduce_loss1, epoch)
+                writer.add_scalar('loss2:', reduce_loss2, epoch)
+                writer.add_scalar('loss3:', reduce_loss3, epoch)
+
+            # validation here
+
 
             if args.local_rank == 0:
-                logging.info('Epoch: {}_Iter:{}  loss: {:.5f} || 1:{:.4f} | 2:{:.4f} | 3:{:.4f} ||'
-                             .format(epoch, i, reduce_loss, reduce_loss1, reduce_loss2, reduce_loss3))
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        end_epoch = time.time()
-        if args.local_rank == 0:
-            if (epoch + 1) % int(args.save_freq) == 0 \
-                    or (epoch + 1) % int(args.end_epoch - 1) == 0 \
-                    or (epoch + 1) % int(args.end_epoch - 2) == 0 \
-                    or (epoch + 1) % int(args.end_epoch - 3) == 0:
-                file_name = os.path.join(checkpoint_dir, 'model_epoch_{}.pth'.format(epoch))
-                torch.save({
-                    'epoch': epoch,
-                    'state_dict': model.state_dict(),
-                    'optim_dict': optimizer.state_dict(),
-                },
-                    file_name)
-
-            writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
-            writer.add_scalar('loss:', reduce_loss, epoch)
-            writer.add_scalar('loss1:', reduce_loss1, epoch)
-            writer.add_scalar('loss2:', reduce_loss2, epoch)
-            writer.add_scalar('loss3:', reduce_loss3, epoch)
-
-        if args.local_rank == 0:
-            epoch_time_minute = (end_epoch-start_epoch)/60
-            remaining_time_hour = (args.end_epoch-epoch-1)*epoch_time_minute/60
-            logging.info('Current epoch time consumption: {:.2f} minutes!'.format(epoch_time_minute))
-            logging.info('Estimated remaining training time: {:.2f} hours!'.format(remaining_time_hour))
+                epoch_time_minute = (end_epoch-start_epoch)/60
+                remaining_time_hour = (args.end_epoch-epoch-1)*epoch_time_minute/60
+                logging.info('Current epoch time consumption: {:.2f} minutes!'.format(epoch_time_minute))
+                logging.info('Estimated remaining training time: {:.2f} hours!'.format(remaining_time_hour))
 
     if args.local_rank == 0:
         writer.close()

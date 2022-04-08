@@ -18,7 +18,7 @@ from models.TransBTS.TransBTS_downsample8x_skipconnection import TransBTS
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--user', default='name of user', type=str)
+parser.add_argument('--user', default='cap5516.student4', type=str)
 
 parser.add_argument('--root', default='path to testing set', type=str)
 
