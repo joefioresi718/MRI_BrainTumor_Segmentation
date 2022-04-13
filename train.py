@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from utils.tools import all_reduce_tensor
 from tensorboardX import SummaryWriter
 from torch import nn
+from predict import validate_softmax
 from sklearn.model_selection import KFold
 
 
@@ -39,6 +40,12 @@ parser.add_argument('--description',
                             'training on train.txt!',
                     type=str)
 
+parser.add_argument('--output_dir', default='output', type=str)
+
+parser.add_argument('--submission', default='submission', type=str)
+
+parser.add_argument('--visual', default='visualization', type=str)
+
 # DataSet Information
 parser.add_argument('--root', default='data/', type=str)
 
@@ -48,7 +55,7 @@ parser.add_argument('--valid_dir', default='data/', type=str)
 
 parser.add_argument('--mode', default='train', type=str)
 
-parser.add_argument('--train_file', default='train.txt', type=str)
+parser.add_argument('--train_file', default='data.txt', type=str)
 
 parser.add_argument('--valid_file', default='valid.txt', type=str)
 
@@ -95,7 +102,7 @@ parser.add_argument('--batch_size', default=4, type=int)
 
 parser.add_argument('--start_epoch', default=0, type=int)
 
-parser.add_argument('--end_epoch', default=1000, type=int)
+parser.add_argument('--end_epoch', default=500, type=int)
 
 parser.add_argument('--save_freq', default=100, type=int)
 
@@ -104,6 +111,10 @@ parser.add_argument('--resume', default='', type=str)
 parser.add_argument('--load', default=True, type=bool)
 
 parser.add_argument('--local_rank', default=0, type=int, help='node rank for distributed training')
+
+parser.add_argument('--use_TTA', default=False, type=bool)
+
+parser.add_argument('--save_format', default='nii', choices=['npy', 'nii'], type=str)
 
 args = parser.parse_args()
 
@@ -162,9 +173,14 @@ def main_worker():
 
     # evaluation
     submission = os.path.join(os.path.abspath(os.path.dirname(__file__)), args.output_dir,
-                              args.submission, args.experiment + args.test_date)
+                              args.submission, args.experiment + args.date)
     visual = os.path.join(os.path.abspath(os.path.dirname(__file__)), args.output_dir,
-                          args.visual, args.experiment + args.test_date)
+                          args.visual, args.experiment + args.date)
+
+    if not os.path.exists(submission):
+        os.makedirs(submission, exist_ok=True)
+    if not os.path.exists(visual):
+        os.makedirs(visual, exist_ok=True)
 
     start_time = time.time()
 
@@ -183,11 +199,12 @@ def main_worker():
 
     # k-fold cross valid
     kf = KFold(n_splits=5, shuffle=True)
-
+    split = 0
     for train_index, test_index in kf.split(names):
-        train_set = BraTS(names[train_index], paths[train_index], 'train')
+        split += 1
+        train_set = BraTS([names[i] for i in train_index], [paths[i] for i in train_index], 'train')
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
-        valid_set = BraTS(names[test_index], paths[test_index], 'valid')
+        valid_set = BraTS([names[i] for i in test_index], [paths[i] for i in test_index], 'valid')
         valid_sampler = torch.utils.data.distributed.DistributedSampler(valid_set)
 
         logging.info('Samples for train = {}'.format(len(train_set)))
@@ -197,6 +214,7 @@ def main_worker():
                                   drop_last=True, num_workers=args.num_workers, pin_memory=True)
         valid_loader = DataLoader(dataset=valid_set, batch_size=1, shuffle=False, num_workers=args.num_workers,
                                   pin_memory=True)
+        best_loss = 10
 
         for epoch in range(args.start_epoch, args.end_epoch):
             train_sampler.set_epoch(epoch)  # shuffle
@@ -211,7 +229,6 @@ def main_worker():
                 x, target = data
                 x = x.cuda(args.local_rank, non_blocking=True)
                 target = target.cuda(args.local_rank, non_blocking=True)
-
 
                 output = model(x)
 
@@ -231,11 +248,8 @@ def main_worker():
 
             end_epoch = time.time()
             if args.local_rank == 0:
-                if (epoch + 1) % int(args.save_freq) == 0 \
-                        or (epoch + 1) % int(args.end_epoch - 1) == 0 \
-                        or (epoch + 1) % int(args.end_epoch - 2) == 0 \
-                        or (epoch + 1) % int(args.end_epoch - 3) == 0:
-                    file_name = os.path.join(checkpoint_dir, 'model_epoch_{}.pth'.format(epoch))
+                if (epoch + 1) % int(args.save_freq) == 0:
+                    file_name = os.path.join(checkpoint_dir, f'split_{split}_model_epoch_{epoch}.pth')
                     torch.save({
                         'epoch': epoch,
                         'state_dict': model.state_dict(),
@@ -243,14 +257,25 @@ def main_worker():
                     },
                         file_name)
 
+                    # validation here
+                    with torch.no_grad():
+                        validate_softmax(valid_loader=valid_loader,
+                                         model=model,
+                                         savepath='',
+                                         visual=visual,
+                                         names=valid_set.names,
+                                         use_TTA=args.use_TTA,
+                                         save_format=args.save_format,
+                                         snapshot=True,
+                                         postprocess=True,
+                                         valid_in_train=True
+                                         )
+
                 writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
                 writer.add_scalar('loss:', reduce_loss, epoch)
                 writer.add_scalar('loss1:', reduce_loss1, epoch)
                 writer.add_scalar('loss2:', reduce_loss2, epoch)
                 writer.add_scalar('loss3:', reduce_loss3, epoch)
-
-            # validation here
-
 
             if args.local_rank == 0:
                 epoch_time_minute = (end_epoch-start_epoch)/60

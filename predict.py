@@ -8,6 +8,7 @@ cudnn.benchmark = True
 import numpy as np
 import nibabel as nib
 import imageio
+from scipy.spatial.distance import directed_hausdorff
 
 
 
@@ -81,11 +82,11 @@ def softmax_output_dice(output, target):
     o = output > 0; t = target > 0 # ce
     ret += dice_score(o, t),
     # core
-    o = (output == 1) | (output == 3)
-    t = (target == 1) | (target == 3)
+    o = (output == 2) | (output == 3)
+    t = (target == 2) | (target == 3)
     ret += dice_score(o, t),
     # active
-    o = (output == 3);t = (target == 4)
+    o = (output == 3);t = (target == 3)
     ret += dice_score(o, t),
 
     return ret
@@ -97,11 +98,9 @@ keys = 'whole', 'core', 'enhancing', 'loss'
 def validate_softmax(
         valid_loader,
         model,
-        load_file,
-        multimodel,
         savepath='',  # when in validation set, you must specify the path to save the 'nii' segmentation results here
         names=None,  # The names of the patients orderly!
-        verbose=False,
+        verbose=True,
         use_TTA=False,  # Test time augmentation, False as default!
         save_format=None,  # ['nii','npy'], use 'nii' as default. Its purpose is for submission.
         snapshot=False,  # for visualization. Default false. It is recommended to generate the visualized figures.
@@ -115,6 +114,9 @@ def validate_softmax(
 
     runtimes = []
     ET_voxels_pred_list = []
+
+    validation_dice = []
+    hausdorff = 0
 
     for i, data in enumerate(valid_loader):
         print('-------------------------------------------------------------------')
@@ -136,38 +138,7 @@ def validate_softmax(
             logging.info('Single sample test time consumption {:.2f} minutes!'.format(elapsed_time/60))
             runtimes.append(elapsed_time)
 
-
-            if multimodel:
-                logit = F.softmax(logit, dim=1)
-                output = logit / 4.0
-
-                load_file1 = load_file.replace('7998', '7996')
-                if os.path.isfile(load_file1):
-                    checkpoint = torch.load(load_file1)
-                    model.load_state_dict(checkpoint['state_dict'])
-                    print('Successfully load checkpoint {}'.format(load_file1))
-                    logit = tailor_and_concat(x, model)
-                    logit = F.softmax(logit, dim=1)
-                    output += logit / 4.0
-                load_file1 = load_file.replace('7998', '7997')
-                if os.path.isfile(load_file1):
-                    checkpoint = torch.load(load_file1)
-                    model.load_state_dict(checkpoint['state_dict'])
-                    print('Successfully load checkpoint {}'.format(load_file1))
-                    logit = tailor_and_concat(x, model)
-                    logit = F.softmax(logit, dim=1)
-                    output += logit / 4.0
-                load_file1 = load_file.replace('7998', '7999')
-                if os.path.isfile(load_file1):
-                    checkpoint = torch.load(load_file1)
-                    model.load_state_dict(checkpoint['state_dict'])
-                    print('Successfully load checkpoint {}'.format(load_file1))
-                    logit = tailor_and_concat(x, model)
-                    logit = F.softmax(logit, dim=1)
-                    output += logit / 4.0
-            else:
-                output = F.softmax(logit, dim=1)
-
+            output = F.softmax(logit, dim=1)
 
         else:
             x = x[..., :155]
@@ -183,6 +154,12 @@ def validate_softmax(
 
         output = output[0, :, :H, :W, :T].cpu().detach().numpy()
         output = output.argmax(0)
+        target = target[0, :H, :W, :T].cpu().detach().numpy()
+
+        validation_dice += softmax_output_dice(output, target)
+
+        for flat in range(T):
+            hausdorff += directed_hausdorff(output[:, :, flat], target[:, :, flat])[0]
 
         name = str(i)
         if names:
@@ -191,7 +168,7 @@ def validate_softmax(
 
         print(msg)
 
-        if savepath:
+        if savepath != '':
             # .npy for further model ensemble
             # .nii for directly model submission
             assert save_format in ['npy', 'nii']
@@ -202,8 +179,8 @@ def validate_softmax(
                 oname = os.path.join(savepath, name + '.nii.gz')
                 seg_img = np.zeros(shape=(H, W, T), dtype=np.uint8)
 
-                seg_img[np.where(output == 1)] = 1
-                seg_img[np.where(output == 2)] = 2
+                seg_img[np.where(output == 2)] = 1
+                seg_img[np.where(output == 1)] = 2
                 seg_img[np.where(output == 3)] = 4
                 if verbose:
                     print('1:', np.sum(seg_img == 1), ' | 2:', np.sum(seg_img == 2), ' | 4:', np.sum(seg_img == 4))
@@ -226,9 +203,14 @@ def validate_softmax(
 
                     for frame in range(T):
                         if not os.path.exists(os.path.join(visual, name)):
-                            os.makedirs(os.path.join(visual, name))
+                            os.makedirs(os.path.join(visual, name), exist_ok=True)
                         # scipy.misc.imsave(os.path.join(visual, name, str(frame)+'.png'), Snapshot_img[:, :, :, frame])
                         imageio.imwrite(os.path.join(visual, name, str(frame)+'.png'), Snapshot_img[:, :, :, frame])
 
+    validation_dice = [dice / len(valid_loader) for dice in validation_dice]
+    hausdorff = hausdorff / len(valid_loader)
+    print(f'Validation Set Dice Score Averages - WT:{validation_dice[0]:07f} TC:{validation_dice[1]:07f} ET:{validation_dice[2]:07f}')
+    print(f'Validation Set Hausdorff Distance Average - {hausdorff:05f}')
+    if not use_TTA:
+        print('runtimes:', sum(runtimes)/len(runtimes))
 
-    print('runtimes:', sum(runtimes)/len(runtimes))
